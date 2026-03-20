@@ -1,0 +1,75 @@
+name: Nexus macOS VNC Deployment
+on: 
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/nexus-vnc.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      
+    - name: Setup Environment
+      run: |
+        echo "[INFO] OS: macos-latest (macOS 14+)"
+        
+    - name: Install Ngrok
+      run: brew install ngrok
+        
+    - name: Configure Ngrok
+      run: ngrok authtoken 3A1U8v4Hgshl3u7YbgmbDwX557U_2qkyufwhBM51Z3fXnhBjv
+      
+    - name: Nuke Apple VNC Security & Enable Screen Sharing
+      run: |
+        echo "[INFO] Disabling Firewall..."
+        sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+        
+        echo "[INFO] Downgrading Apple Encryption to allow RealVNC..."
+        sudo defaults write /Library/Preferences/com.apple.RemoteManagement.plist ScreenSharingReqPermEnabled -bool false
+        sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnAndNoEnc -bool true
+        
+        echo "[INFO] Writing VNC Password Hash..."
+        sudo mkdir -p /Library/Preferences
+        echo "Sinket@1" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA" } $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; my $i = 0; foreach (@p) { printf "\%02X", $_ = (($_ >> 1) & 0x55) | (($_ << 1) & 0xAA) ^ $k[$i++]; } print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+        sudo chmod 600 /Library/Preferences/com.apple.VNCSettings.txt
+        sudo chown root:wheel /Library/Preferences/com.apple.VNCSettings.txt
+        
+        echo "[INFO] Enabling Remote Management..."
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -allowAccessFor -allUsers -privs -all
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes
+        
+        echo "[INFO] Forcing services restart..."
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -restart -agent -console
+        sudo launchctl enable system/com.apple.screensharing || true
+        sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
+        
+    - name: Create VNC User
+      run: |
+        echo "[INFO] Setting up user: admin_sk"
+        sudo sysadminctl -addUser admin_sk -password "Sinket@1" -admin || true
+        
+    - name: Wake Display & Establish Tunnel
+      run: |
+        echo "[INFO] Waking up display..."
+        sudo pmset -a displaysleep 0 sleep 0 hibernatemode 0 disablesleep 1
+        caffeinate -u -t 5 &
+        
+        echo "[INFO] Starting Ngrok tunnel..."
+        ngrok tcp 5900 > /dev/null &
+        sleep 10
+        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels)
+        echo "========================================"
+        echo "VNC Address: $(echo $TUNNEL_INFO | grep -o 'tcp://[^\"]*' | head -1)"
+        echo "Username: <LEAVE THIS BLANK IN VNC VIEWER>"
+        echo "Password: Sinket@1"
+        echo "========================================"
+        
+    - name: Keep Alive
+      run: |
+        for i in $(seq 360 -1 1); do sleep 60; done
